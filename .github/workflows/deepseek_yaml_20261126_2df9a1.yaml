@@ -160,34 +160,88 @@ jobs:
           grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
             sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
 
-          # --- Puntos de hook manual (Manual Hook) ---
-          # 1) execveat en fs/exec.c
-          if ! grep -q 'ksu_handle_execveat' fs/exec.c; then
-            sed -i '/SYSCALL_DEFINE5(execveat/a\
-            \tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);' fs/exec.c
-          fi
+          # Insertar los hooks manuales dentro del cuerpo de las funciones
+          # correctas (no después de la definición de la syscall).
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
 
-          # 2) setresuid en kernel/sys.c
-          if ! grep -q 'ksu_handle_setresuid' kernel/sys.c; then
-            sed -i '/SYSCALL_DEFINE3(setresuid/a\
-            \tksu_handle_setresuid(ruid, euid, suid);' kernel/sys.c
-          fi
+          # --- Hook 1: ksu_handle_execveat dentro de do_execveat_common (fs/exec.c) ---
+          p = Path("fs/exec.c")
+          src = p.read_text(encoding="utf-8")
+          if "ksu_handle_execveat(&fd" not in src:
+              pat = re.compile(
+                  r'(static int do_execveat_common\s*\([^)]+\)\s*\n\{)',
+                  re.M
+              )
+              hook = (
+                  r'\1\n'
+                  '#ifdef CONFIG_KSU\n'
+                  '\textern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,\n'
+                  '\t\t\t\t       void *argv, void *envp, int *flags);\n'
+                  '\tksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);\n'
+                  '#endif\n'
+              )
+              src2, n = pat.subn(hook, src, count=1)
+              if n == 0:
+                  raise SystemExit("ERROR: do_execveat_common not found in fs/exec.c")
+              p.write_text(src2, encoding="utf-8")
+              print("OK: execveat hook inserted into do_execveat_common")
+          else:
+              print("SKIP: execveat hook already present")
 
-          echo "Hooks manuales aplicados:"
-          grep -n 'ksu_handle_execveat' fs/exec.c || true
-          grep -n 'ksu_handle_setresuid' kernel/sys.c || true
+          # --- Hook 2: ksu_handle_setresuid dentro de SYSCALL_DEFINE3(setresuid) (kernel/sys.c) ---
+          p = Path("kernel/sys.c")
+          src = p.read_text(encoding="utf-8")
+          if "ksu_handle_setresuid(ruid" not in src:
+              pat = re.compile(
+                  r'(SYSCALL_DEFINE3\s*\(\s*setresuid\b[^)]*\)\s*\n\{)',
+                  re.M
+              )
+              hook = (
+                  r'\1\n'
+                  '#ifdef CONFIG_KSU\n'
+                  '\textern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);\n'
+                  '\tksu_handle_setresuid(ruid, euid, suid);\n'
+                  '#endif\n'
+              )
+              src2, n = pat.subn(hook, src, count=1)
+              if n == 0:
+                  raise SystemExit("ERROR: SYSCALL_DEFINE3(setresuid) not found in kernel/sys.c")
+              p.write_text(src2, encoding="utf-8")
+              print("OK: setresuid hook inserted")
+          else:
+              print("SKIP: setresuid hook already present")
+          PY
 
+          echo "--- Verificación de hooks ---"
+          grep -n -A3 'ksu_handle_execveat(&fd' fs/exec.c || true
+          grep -n -A2 'ksu_handle_setresuid(ruid' kernel/sys.c || true
+
+      # ------------------------------------------------------------------
+      # Exportar write_op (red de seguridad; CONFIG_KALLSYMS_ALL ya está en el defconfig)
+      # ------------------------------------------------------------------
       - name: Export write_op symbol
         if: github.ref_name == 'root'
         run: |
           set -euo pipefail
           SELINUXFS="security/selinux/selinuxfs.c"
           if [ -f "$SELINUXFS" ] && ! grep -q 'EXPORT_SYMBOL(write_op)' "$SELINUXFS"; then
-            sed -i '/static ssize_t (\*write_op\[\])/a\
-            EXPORT_SYMBOL(write_op);' "$SELINUXFS"
-            echo "write_op exportado."
+            python3 - <<'PY'
+          import re
+          from pathlib import Path
+          p = Path("security/selinux/selinuxfs.c")
+          src = p.read_text(encoding="utf-8")
+          # Insertar EXPORT_SYMBOL(write_op) justo después de la definición del array write_op[]
+          pat = re.compile(r'(static ssize_t \(\*write_op\[\]\).*?\};)', re.S)
+          src2, n = pat.subn(r'\1\nEXPORT_SYMBOL(write_op);', src, count=1)
+          if n == 0:
+              raise SystemExit("ERROR: write_op[] definition not found in selinuxfs.c")
+          p.write_text(src2, encoding="utf-8")
+          print("OK: write_op exported")
+          PY
           else
-            echo "write_op ya exportado o archivo no encontrado."
+            echo "write_op ya exportado o archivo no encontrado"
           fi
 
       - name: Enable BakaSU in miatoll defconfig (root branch only)
@@ -243,6 +297,7 @@ jobs:
               base = re.match(r"(\d+\.\d+\.\d+)", match.group(2))
               if not base:
                   raise SystemExit(f"Could not parse release for preset {preset}")
+              # The requested public uname/banner release for the 5.10 preset.
               base_version = "5.10.357" if preset == "5.10" else base.group(1)
               release = f"{base_version}-Android17-{name}"
               src = src[:match.start(2)] + release + src[match.end(2):]
@@ -330,6 +385,9 @@ jobs:
           set -eo pipefail
           LLVM_BIN="$HOME/clang/bin"
 
+          # IMPORTANT: keep Ubuntu tools first in PATH. GCC invokes `ld` by
+          # searching PATH; putting the bundled Clang directory first makes
+          # host utilities accidentally use its incompatible `ld` binary.
           export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$LLVM_BIN"
           export KBUILD_BUILD_USER=Android
           export KBUILD_BUILD_HOST=Android
@@ -339,6 +397,7 @@ jobs:
           export HOSTCXX=/usr/bin/g++
           export HOSTLD=/usr/bin/ld
 
+          # Fail early if the downloaded LLVM toolchain is incomplete.
           test -x "$LLVM_BIN/clang"
           test -x "$LLVM_BIN/ld.lld"
           test -x "$LLVM_BIN/llvm-ar"
@@ -346,6 +405,7 @@ jobs:
           /usr/bin/ld --version | head -1
           echo "Kernel compiler: $LLVM_BIN/clang"
 
+          # Use absolute LLVM paths for the ARM64 target; host tools remain GCC/BFD.
           MAKE_ARGS=(
             O=out
             ARCH=arm64
@@ -369,6 +429,7 @@ jobs:
             scripts/config --file out/.config -d LLVM_POLLY || true
             make "${MAKE_ARGS[@]}" olddefconfig
           fi
+          # Build both the standalone compressed kernel and the DTB-appended image.
           make "${MAKE_ARGS[@]}" -j"$(nproc)" Image.gz Image.gz-dtb
           test -s out/arch/arm64/boot/Image.gz
           test -s out/arch/arm64/boot/Image.gz-dtb
@@ -388,6 +449,7 @@ jobs:
           rm -rf ak3/.git ak3/.github ak3/README.md ak3/LICENSE
           cp anykernel3/anykernel.sh ak3/anykernel.sh
 
+          # Advertise the complete Xiaomi Miatoll family in the installer metadata.
           sed -i "s|^kernel.string=.*|kernel.string=$NAME Android17 Kernel for all Xiaomi Miatoll devices ($REL)|" ak3/anykernel.sh
 
           cp out/arch/arm64/boot/Image.gz ak3/
@@ -410,6 +472,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Describe the source commits in the release notes.
           {
             echo "## Android17 Kernel"
             echo
