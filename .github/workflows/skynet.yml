@@ -3,6 +3,7 @@ name: SKYNET - Build and Release
 # Single workflow: checks GitHub Releases, patches, builds, packages,
 # publishes and verifies the release.
 on:
+
   workflow_dispatch:
     inputs:
       kernel_name:
