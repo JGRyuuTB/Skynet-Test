@@ -1,4 +1,4 @@
-name: Android17 - Build Kernel
+name: Android17 - Build Kernel (Root - BakaSU)
 
 # Builds the Android17 kernel and publishes only the flashable ZIP and SHA-256 file.
 on:
