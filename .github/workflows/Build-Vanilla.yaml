@@ -45,6 +45,7 @@ jobs:
       name: ${{ steps.p.outputs.name }}
       slug: ${{ steps.p.outputs.slug }}
       tag: ${{ steps.p.outputs.tag }}
+      version: ${{ steps.p.outputs.version }}
       preset: ${{ steps.p.outputs.preset }}
       preset_idx: ${{ steps.p.outputs.preset_idx }}
       fp: ${{ steps.p.outputs.fp }}
@@ -82,6 +83,7 @@ jobs:
           if [ -n "$EXISTING" ] && [ "${IN_FORCE:-false}" != "true" ]; then SKIP=true; fi
           {
             echo "skip=$SKIP"; echo "name=$NAME"; echo "slug=$SLUG"; echo "tag=$TAG"
+            echo "version=$VERSION"
             echo "preset=$PRESET"; echo "preset_idx=$IDX"; echo "fp=$FP"
           } >> "$GITHUB_OUTPUT"
 
@@ -94,13 +96,14 @@ jobs:
       NAME: ${{ needs.plan.outputs.name }}
       SLUG: ${{ needs.plan.outputs.slug }}
       TAG: ${{ needs.plan.outputs.tag }}
+      VERSION: ${{ needs.plan.outputs.version }}
       PRESET: ${{ needs.plan.outputs.preset }}
       PRESET_IDX: ${{ needs.plan.outputs.preset_idx }}
       FP: ${{ needs.plan.outputs.fp }}
       DEFCONFIG: vendor/xiaomi/miatoll_defconfig
     steps:
       - uses: actions/checkout@v4
-        with: { submodules: recursive, fetch-depth: 10 } # Cambiado a 10 para el changelog del bot
+        with: { submodules: recursive, fetch-depth: 10 }
 
       - name: Free disk space
         run: |
@@ -213,7 +216,6 @@ jobs:
         run: |
           set -euo pipefail
           { 
-            # Insertar banner en el release de GitHub
             echo "![Banner](https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/assets/banner.png)"
             echo
             echo "## Android17 Kernel (Vanilla)"
@@ -252,18 +254,23 @@ jobs:
           
           BANNER_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/assets/banner.png"
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/$TAG"
-          
-          # Obtener los ultimos 3 commits para el changelog (en ingles)
           CHANGELOG=$(git log -3 --pretty=format:"- %s")
           
-          # Crear mensaje en ingles
-          CAPTION="🚀 <b>New Kernel Release!</b> 🚀%0A%0A<b>$TAG | ZeroTwo Kernel 5.15.170-Android17-$NAME</b>%0A%0A<b>Changelog:</b>%0A$CHANGELOG%0A%0A📥 <a href='$RELEASE_URL'>Download here</a>"
+          CAPTION="🚀 <b>New Kernel Release!</b> 🚀
+
+<b>$TAG | ZeroTwo Kernel 5.15.170-Android17-$NAME</b>
+
+👤 <b>Maintainer:</b> @JG_ryuu
+
+<b>Changelog:</b>
+$CHANGELOG
+
+📥 <a href='$RELEASE_URL'>Download here</a>"
           
-          # Crear JSON payload de forma segura con jq
           jq -n \
             --arg chat_id "$CHAT_ID" \
             --arg photo "$BANNER_URL" \
-            --arg caption "$(echo -e "$CAPTION" | sed 's/%0A/\n/g')" \
+            --arg caption "$CAPTION" \
             '{chat_id: $chat_id, photo: $photo, caption: $caption, parse_mode: "HTML"}' > payload.json
 
           curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendPhoto" \

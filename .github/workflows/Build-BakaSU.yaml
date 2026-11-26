@@ -45,6 +45,7 @@ jobs:
       name: ${{ steps.p.outputs.name }}
       slug: ${{ steps.p.outputs.slug }}
       tag: ${{ steps.p.outputs.tag }}
+      version: ${{ steps.p.outputs.version }}
       preset: ${{ steps.p.outputs.preset }}
       preset_idx: ${{ steps.p.outputs.preset_idx }}
       fp: ${{ steps.p.outputs.fp }}
@@ -82,6 +83,7 @@ jobs:
           if [ -n "$EXISTING" ] && [ "${IN_FORCE:-false}" != "true" ]; then SKIP=true; fi
           {
             echo "skip=$SKIP"; echo "name=$NAME"; echo "slug=$SLUG"; echo "tag=$TAG"
+            echo "version=$VERSION"
             echo "preset=$PRESET"; echo "preset_idx=$IDX"; echo "fp=$FP"
           } >> "$GITHUB_OUTPUT"
 
@@ -94,6 +96,7 @@ jobs:
       NAME: ${{ needs.plan.outputs.name }}
       SLUG: ${{ needs.plan.outputs.slug }}
       TAG: ${{ needs.plan.outputs.tag }}
+      VERSION: ${{ needs.plan.outputs.version }}
       PRESET: ${{ needs.plan.outputs.preset }}
       PRESET_IDX: ${{ needs.plan.outputs.preset_idx }}
       FP: ${{ needs.plan.outputs.fp }}
