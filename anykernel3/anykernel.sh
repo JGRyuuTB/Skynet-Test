@@ -1,6 +1,6 @@
 ### AnyKernel3 Ramdisk Mod Script
 ## osm0sis @ xda-developers
-## SKYNET Kernel 17S — Xiaomi Miatoll (SM6250), Android 17 (rootless).
+## Android17 kernel — Xiaomi Miatoll (SM6250).
 ##
 ## This file is overlaid onto a checkout of osm0sis/AnyKernel3 by
 ## scripts/package-anykernel.sh. It leaves the boot ramdisk untouched:
@@ -12,7 +12,7 @@
 ### AnyKernel setup
 # global properties
 properties() { '
-kernel.string=SKYNET Kernel 17S for miatoll by Saamitk
+kernel.string=ゼロツー002-RTX Android17 Kernel for miatoll
 do.devicecheck=1
 do.modules=0
 do.systemless=1
