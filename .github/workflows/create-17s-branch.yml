@@ -1,0 +1,37 @@
+name: Create or sync 17S (rootless) branch
+
+# Creates or updates the rootless `17S` branch from the dispatched ref without
+# removing BakaSU/SUSFS from the rooted branch (`17` / `main`).
+# Dispatch manually from Actions -> "Create or sync 17S (rootless) branch" -> "Run workflow".
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: Rootless branch to create or update
+        required: true
+        default: 17S
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  sync-17s:
+    name: Build & push rootless 17S branch
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Strip BakaSU & SUSFS and push ${{ inputs.branch_name }}
+        env:
+          TARGET_BRANCH: ${{ inputs.branch_name }}
+        run: |
+          git config user.name "${GITHUB_ACTOR}"
+          git config user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
+          ./scripts/create-17s-branch.sh --in-place --branch "$TARGET_BRANCH" --push origin
+          echo "Pushed rootless branch '$TARGET_BRANCH' at commit $(git rev-parse --short=10 HEAD)"

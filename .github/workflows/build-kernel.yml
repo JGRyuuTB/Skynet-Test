@@ -1,0 +1,166 @@
+name: Build SKYNET kernel (AnyKernel3 ZIP)
+
+# Produces a flashable AnyKernel3 ZIP from the in-tree kernel source.
+# Run it from the Actions tab ("Run workflow"). It also runs on skynet-17-*
+# tags, and when its own workflow/build/packaging files change (one-shot
+# registration trigger). Normal kernel/doc commits do not start a 30-min build.
+
+on:
+  workflow_dispatch:
+    inputs:
+      clang_repo:
+        description: Prebuilt Clang/LLD repository
+        required: true
+        default: https://github.com/kdrag0n/proton-clang.git
+      clang_ref:
+        description: Branch or tag of the Clang repository
+        required: true
+        default: master
+      target:
+        description: Kernel make target
+        required: true
+        default: Image.gz-dtb
+      release_tag:
+        description: Optional tag for a GitHub Release (empty = artifact only)
+        required: false
+        default: ''
+      no_polly:
+        description: Disable CONFIG_LLVM_POLLY (needed for toolchains without Polly)
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      no_ksu:
+        description: Build rootless 17S variant (disable CONFIG_KSU and CONFIG_KSU_SUSFS)
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+  # Tag pushes ignore path filters, so release tags always build. Editing the
+  # build pipeline on any branch also builds once (and registers the workflow).
+  push:
+    paths:
+      - '.github/workflows/build-kernel.yml'
+      - 'scripts/build.sh'
+      - 'scripts/package-anykernel.sh'
+      - 'anykernel3/**'
+    tags:
+      - 'skynet-17-*'
+      - 'skynet-17R-*'
+      - 'skynet-17S-*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Free runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/lib/node_modules || true
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            bc bison flex libssl-dev libelf-dev cpio zip ccache python3 \
+            gcc g++ make \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi
+
+      - name: Fetch pinned Clang toolchain
+        env:
+          CLANG_REPO: ${{ inputs.clang_repo || 'https://github.com/kdrag0n/proton-clang.git' }}
+          CLANG_REF: ${{ inputs.clang_ref || 'master' }}
+        run: |
+          git clone --depth 1 -b "$CLANG_REF" "$CLANG_REPO" "$HOME/clang"
+          "$HOME/clang/bin/clang" --version | head -n1
+          ls "$HOME/clang/bin/ld.lld"
+
+      - name: Verify in-tree source
+        run: ./scripts/verify-source.sh
+
+      - name: Configure and build
+        id: kbuild
+        env:
+          TARGET: ${{ inputs.target || 'Image.gz-dtb' }}
+          NO_POLLY: ${{ inputs.no_polly || 'true' }}
+          NO_KSU: ${{ inputs.no_ksu || 'false' }}
+        run: |
+          EXTRA=()
+          LINE_PREFIX="skynet-17R"
+          if [ "$NO_POLLY" = "true" ]; then EXTRA+=(--no-polly); fi
+          if [ "$NO_KSU" = "true" ] || [ ! -L drivers/kernelsu ]; then
+            LINE_PREFIX="skynet-17S"
+            if [ -L drivers/kernelsu ]; then
+              EXTRA+=(--no-ksu)
+            fi
+          fi
+          ./scripts/build.sh --clang-dir "$HOME/clang/bin" \
+            --jobs "$(nproc)" --target "$TARGET" "${EXTRA[@]}"
+          echo "--- kernel.release ---"
+          REL="$(cat out/include/config/kernel.release 2>/dev/null || printf 'unknown')"
+          echo "$REL"
+          case "$REL" in
+            *SKYNET*) ;;
+            *) echo "::error::kernel.release does not contain SKYNET: $REL"; exit 1 ;;
+          esac
+          if [ "$LINE_PREFIX" = "skynet-17S" ]; then
+            if grep -qE '^CONFIG_KSU(=|_SUSFS=)' out/.config; then
+              echo "::error::rootless 17S build still has CONFIG_KSU/CONFIG_KSU_SUSFS enabled"
+              exit 1
+            fi
+          fi
+          grep -E '^(CONFIG_LOCALVERSION|CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_TRACE_GPU_MEM)=' out/.config || true
+          echo "line_prefix=$LINE_PREFIX" >> "$GITHUB_OUTPUT"
+          echo "--- boot artefacts ---"
+          ls -lh out/arch/arm64/boot/ || true
+
+      - name: Package AnyKernel3 ZIP
+        id: package
+        run: |
+          NAME="${{ steps.kbuild.outputs.line_prefix }}-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+          ./scripts/package-anykernel.sh --name "$NAME" \
+            --out "$GITHUB_WORKSPACE/$NAME.zip"
+          sha256sum "$NAME.zip" | tee "$NAME.zip.sha256"
+          echo "zip=$NAME.zip" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: skynet-kernel-zip
+          path: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.zip }}.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: ${{ inputs.release_tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          prerelease: true
+          body: |
+            ## UNTESTED — hardware validation required
+
+            Automatically built by `Build SKYNET kernel (AnyKernel3 ZIP)`;
+            **not boot-tested on any miatoll device**. Back up your stock
+            `boot`/`dtbo`, verify the device codename, block path and slot
+            layout, and check the attached `.sha256` before flashing.
+
+            See [docs/RELEASING.md](https://github.com/${{ github.repository }}/blob/main/docs/RELEASING.md).
+          files: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.zip }}.sha256

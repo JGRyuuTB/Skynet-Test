@@ -1,0 +1,43 @@
+name: Validate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Docs and scripts
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # Only the SKYNET helper scripts are checked. After the source is
+      # flattened, scripts/ also contains the kernel's own build scripts,
+      # which are not ours to lint.
+      - name: Shell syntax and executable bits
+        run: |
+          set -euo pipefail
+          for f in scripts/build.sh scripts/verify-source.sh \
+                   scripts/package-anykernel.sh scripts/create-17s-branch.sh; do
+            bash -n "$f"
+            test -x "$f" || { echo "not executable: $f"; exit 1; }
+          done
+
+      - name: ShellCheck (errors)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -S error scripts/build.sh scripts/verify-source.sh \
+            scripts/package-anykernel.sh scripts/create-17s-branch.sh
+
+      - name: In-tree source and documentation pin
+        run: ./scripts/verify-source.sh
+
+      - name: Markdown links
+        run: python3 scripts/check-links.py
