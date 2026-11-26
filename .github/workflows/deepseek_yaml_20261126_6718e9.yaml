@@ -119,7 +119,7 @@ jobs:
           import re
           from pathlib import Path
 
-          # Hook 1: execveat en do_execveat_common
+          # Hook 1: execveat
           p = Path("fs/exec.c"); src = p.read_text(encoding="utf-8")
           if "ksu_handle_execveat(&fd" not in src:
               pat = re.compile(r'(static int do_execveat_common\s*\([^)]+\)\s*\n\{)', re.M)
@@ -144,7 +144,7 @@ jobs:
               if n == 0: raise SystemExit("ERROR: SYSCALL_DEFINE3(setresuid) not found")
               p.write_text(src2, encoding="utf-8"); print("OK: setresuid")
 
-          # Hook 3: faccessat en fs/open.c (el que BakaSU pidió)
+          # Hook 3: faccessat
           p = Path("fs/open.c"); src = p.read_text(encoding="utf-8")
           if "ksu_handle_faccessat(&dfd" not in src:
               pat = re.compile(r'(SYSCALL_DEFINE3\s*\(\s*faccessat\b[^)]*\)\s*\n\{)', re.M)
@@ -158,17 +158,38 @@ jobs:
                   pat2 = re.compile(r'(static long do_faccessat\s*\([^)]+\)\s*\n\{)', re.M)
                   src2, n = pat2.subn(hook, src, count=1)
                   if n == 0:
-                      raise SystemExit("ERROR: faccessat/do_faccessat not found in fs/open.c")
+                      raise SystemExit("ERROR: faccessat/do_faccessat not found")
               p.write_text(src2, encoding="utf-8"); print("OK: faccessat")
 
-          # NOTA: NO se añade hook de stat/newfstatat (BakaSU no lo pidió y la
-          # firma varía: flag vs flags según el árbol).
+          # Hook 4: newfstatat -> ksu_handle_stat (detectar nombre de variable: flag o flags)
+          p = Path("fs/stat.c"); src = p.read_text(encoding="utf-8")
+          if "ksu_handle_stat(&dfd" not in src:
+              # Detectar el nombre real del último parámetro de la syscall
+              m_sig = re.search(r'SYSCALL_DEFINE4\s*\(\s*newfstatat\b[^)]*\)', src)
+              var = "flag"  # default en 4.14
+              if m_sig:
+                  m_var = re.search(r',\s*int\s*,\s*(\w+)\s*\)', m_sig.group(0))
+                  if m_var:
+                      var = m_var.group(1)
+              pat = re.compile(r'(SYSCALL_DEFINE4\s*\(\s*newfstatat\b[^)]*\)\s*\n\{)', re.M)
+              hook = (r'\1\n#ifdef CONFIG_KSU\n'
+                      '\textern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n'
+                      '\t\t\t\t    int *flags);\n'
+                      f'\tksu_handle_stat(&dfd, &filename, &{var});\n'
+                      '#endif\n')
+              src2, n = pat.subn(hook, src, count=1)
+              if n == 0:
+                  print("WARN: newfstatat no encontrado")
+              else:
+                  p.write_text(src2, encoding="utf-8")
+                  print(f"OK: stat (variable usada: {var})")
           PY
 
           echo "--- Verificación ---"
           grep -n -A2 'ksu_handle_execveat(&fd' fs/exec.c || true
           grep -n -A2 'ksu_handle_setresuid(ruid' kernel/sys.c || true
           grep -n -A2 'ksu_handle_faccessat(&dfd' fs/open.c || true
+          grep -n -A2 'ksu_handle_stat(&dfd' fs/stat.c || true
 
       - name: Export write_op (quitar static + EXPORT_SYMBOL al final)
         if: github.ref_name == 'root'
