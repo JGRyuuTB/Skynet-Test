@@ -183,7 +183,6 @@ jobs:
           # Hook 5: ksu_handle_newfstat_ret dentro de newfstat (retorno)
           p = Path("fs/stat.c"); src = p.read_text(encoding="utf-8")
           if "ksu_handle_newfstat_ret(&fd" not in src:
-              # La syscall es: SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
               pat = re.compile(
                   r'(SYSCALL_DEFINE2\s*\(\s*newfstat\s*,[^)]*struct stat __user \*,\s*statbuf\s*\)\s*\n\{.*?'
                   r'error = cp_new_stat\(&stat, statbuf\);)',
@@ -195,7 +194,6 @@ jobs:
                       '#endif\n')
               src2, n = pat.subn(hook, src, count=1)
               if n == 0:
-                  # Fallback: buscar simplemente "return error;" dentro de newfstat
                   pat2 = re.compile(
                       r'(SYSCALL_DEFINE2\s*\(\s*newfstat\b.*?\n\{.*?)'
                       r'(\n\s*return error;)',
@@ -209,6 +207,34 @@ jobs:
                   src2, n = pat2.subn(repl, src, count=1)
                   if n == 0: raise SystemExit("ERROR: newfstat not found for newfstat_ret hook")
               p.write_text(src2, encoding="utf-8"); print("OK: newfstat_ret")
+
+          # Hook 6: ksu_handle_fstat64_ret dentro de fstat64 (retorno, 32-bit su)
+          p = Path("fs/stat.c"); src = p.read_text(encoding="utf-8")
+          if "ksu_handle_fstat64_ret(&fd" not in src:
+              pat = re.compile(
+                  r'(SYSCALL_DEFINE2\s*\(\s*fstat64\s*,[^)]*struct stat64 __user \*,\s*statbuf\s*\)\s*\n\{.*?'
+                  r'error = cp_new_stat64\(&stat, statbuf\);)',
+                  re.S
+              )
+              hook = (r'\1\n#ifdef CONFIG_KSU\n'
+                      '\textern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n'
+                      '\tksu_handle_fstat64_ret(&fd, &statbuf);\n'
+                      '#endif\n')
+              src2, n = pat.subn(hook, src, count=1)
+              if n == 0:
+                  pat2 = re.compile(
+                      r'(SYSCALL_DEFINE2\s*\(\s*fstat64\b.*?\n\{.*?)'
+                      r'(\n\s*return error;)',
+                      re.S
+                  )
+                  def repl64(m):
+                      return (m.group(1) + '\n#ifdef CONFIG_KSU\n'
+                              '\textern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr);\n'
+                              '\tksu_handle_fstat64_ret(&fd, &statbuf);\n'
+                              '#endif' + m.group(2))
+                  src2, n = pat2.subn(repl64, src, count=1)
+                  if n == 0: raise SystemExit("ERROR: fstat64 not found for fstat64_ret hook")
+              p.write_text(src2, encoding="utf-8"); print("OK: fstat64_ret")
           PY
 
           echo "--- Verificación ---"
@@ -217,6 +243,7 @@ jobs:
           grep -n -A2 'ksu_handle_faccessat(&dfd' fs/open.c || true
           grep -n -A2 'ksu_handle_stat(&dfd' fs/stat.c || true
           grep -n -A2 'ksu_handle_newfstat_ret(&fd' fs/stat.c || true
+          grep -n -A2 'ksu_handle_fstat64_ret(&fd' fs/stat.c || true
 
       - name: Export write_op (quitar static + EXPORT_SYMBOL al final)
         if: github.ref_name == 'root'
