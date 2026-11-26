@@ -100,7 +100,7 @@ jobs:
       - uses: actions/checkout@v4
         with: { submodules: recursive, fetch-depth: 1 }
 
-      - name: Integrate BakaSU (hooks manuales completos)
+      - name: Integrate BakaSU (hooks manuales)
         if: github.ref_name == 'root'
         run: |
           set -euo pipefail
@@ -144,7 +144,7 @@ jobs:
               if n == 0: raise SystemExit("ERROR: SYSCALL_DEFINE3(setresuid) not found")
               p.write_text(src2, encoding="utf-8"); print("OK: setresuid")
 
-          # Hook 3: faccessat en fs/open.c
+          # Hook 3: faccessat en fs/open.c (el que BakaSU pidió)
           p = Path("fs/open.c"); src = p.read_text(encoding="utf-8")
           if "ksu_handle_faccessat(&dfd" not in src:
               pat = re.compile(r'(SYSCALL_DEFINE3\s*\(\s*faccessat\b[^)]*\)\s*\n\{)', re.M)
@@ -161,20 +161,8 @@ jobs:
                       raise SystemExit("ERROR: faccessat/do_faccessat not found in fs/open.c")
               p.write_text(src2, encoding="utf-8"); print("OK: faccessat")
 
-          # Hook 4: newfstatat (por si acaso)
-          p = Path("fs/stat.c"); src = p.read_text(encoding="utf-8")
-          if "ksu_handle_newfstatat" not in src and "ksu_handle_stat" not in src:
-              pat = re.compile(r'(SYSCALL_DEFINE4\s*\(\s*newfstatat\b[^)]*\)\s*\n\{)', re.M)
-              hook = (r'\1\n#ifdef CONFIG_KSU\n'
-                      '\textern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n'
-                      '\t\t\t\t    int *flags);\n'
-                      '\tksu_handle_stat(&dfd, &filename, &flags);\n'
-                      '#endif\n')
-              src2, n = pat.subn(hook, src, count=1)
-              if n > 0:
-                  p.write_text(src2, encoding="utf-8"); print("OK: newfstatat")
-              else:
-                  print("SKIP: newfstatat no encontrado")
+          # NOTA: NO se añade hook de stat/newfstatat (BakaSU no lo pidió y la
+          # firma varía: flag vs flags según el árbol).
           PY
 
           echo "--- Verificación ---"
