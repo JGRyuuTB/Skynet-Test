@@ -64,91 +64,67 @@ jobs:
           IN_TAG: ${{ inputs.release_tag }}
           IN_FORCE: ${{ inputs.force }}
         run: |
+          set -euo pipefail
 
-set -euo pipefail
+          # Keep UTF-8 letters/numbers (including Japanese); allow only safe separators.
+          NAME="$(python3 -c 'import os; s=os.environ.get("IN_NAME") or "ゼロツー002-RTX"; print("".join(c for c in s if c.isalnum() or c in "._-"))')"
+          [ -n "$NAME" ] || NAME="ゼロツー002-RTX"
 
-# Sanitize kernel name while preserving UTF-8 characters (Japanese included)
-NAME="$(python3 -c '
-import os
-s = os.environ.get("IN_NAME") or "ゼロツー002-RTX"
-print("".join(c for c in s if c.isalnum() or c in "._-"))
-')"
+          # ASCII-only slug for ZIP/config filenames.
+          SLUG="$(printf '%s' "$NAME" | iconv -c -f UTF-8 -t ASCII 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
+          [ -n "$SLUG" ] || SLUG="SKYNET"
 
-[ -n "$NAME" ] || NAME="ゼロツー002-RTX"
+          PRESET="${IN_PRESET:-off}"
+          case "$PRESET" in
+            off)  IDX=0 ;;
+            4.19) IDX=1 ;;
+            5.4)  IDX=2 ;;
+            5.10) IDX=3 ;;
+            5.15) IDX=4 ;;
+            6.1)  IDX=5 ;;
+            6.6)  IDX=6 ;;
+            *) echo "::error::Invalid uname preset: $PRESET"; exit 1 ;;
+          esac
 
-# Generate ASCII-compatible slug
-SLUG="$(printf '%s' "$NAME" | iconv -c -f UTF-8 -t ASCII 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
+          SHA="$(git rev-parse HEAD)"
+          FP="$SHA|$NAME|$PRESET"
 
-[ -n "$SLUG" ] || SLUG="SKYNET"
+          TAG="${IN_TAG:-}"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME:-$TAG}"
+          fi
+          if [ -z "$TAG" ]; then
+            LAST="$(gh release list --limit 200 --json tagName -q '.[].tagName' \
+              | grep -E '^skynet-17-r[0-9]+$' \
+              | sed 's/.*-r//' | sort -n | tail -1 || true)"
+            TAG="skynet-17-r$(( ${LAST:-0} + 1 ))"
+          fi
 
-# Uname preset
-PRESET="${IN_PRESET:-off}"
+          SKIP=false
+          EXISTING="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
+            -q ".[] | select((.body // \"\") | contains(\"skynet-fingerprint: $FP\")) | .tag_name" \
+            | sed -n '1p' || true)"
 
-case "$PRESET" in
-  off)  IDX=0 ;;
-  4.19) IDX=1 ;;
-  5.4)  IDX=2 ;;
-  5.10) IDX=3 ;;
-  5.15) IDX=4 ;;
-  6.1)  IDX=5 ;;
-  6.6)  IDX=6 ;;
-  *)
-    echo "::error::Invalid uname preset: $PRESET"
-    exit 1
-    ;;
-esac
+          if [ -n "$EXISTING" ] && [ "${IN_FORCE:-false}" != "true" ]; then
+            echo "::notice::Release $EXISTING already exists for this commit/name/preset. Skipping."
+            SKIP=true
+          fi
 
-# Commit fingerprint
-SHA="$(git rev-parse HEAD)"
-FP="$SHA|$NAME|$PRESET"
+          {
+            echo "skip=$SKIP"
+            echo "name=$NAME"
+            echo "slug=$SLUG"
+            echo "tag=$TAG"
+            echo "preset=$PRESET"
+            echo "preset_idx=$IDX"
+            echo "fp=$FP"
+          } >> "$GITHUB_OUTPUT"
 
-# Release tag
-TAG="${IN_TAG:-}"
-
-if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-  TAG="$GITHUB_REF_NAME"
-fi
-
-if [ -z "$TAG" ]; then
-  LAST="$(gh release list --limit 200 --json tagName \
-    -q '.[].tagName' |
-    grep -E '^skynet-17-r[0-9]+$' |
-    sed 's/.*-r//' |
-    sort -n |
-    tail -1 || true)"
-
-  TAG="skynet-17-r$(( ${LAST:-0} + 1 ))"
-fi
-
-# Check previous releases
-SKIP=false
-EXISTING="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
-  -q ".[] | select((.body // \"\") | contains(\"skynet-fingerprint: $FP\")) | .tag_name" \
-  | sed -n '1p' || true)"
-
-if [ -n "$EXISTING" ] && [ "${IN_FORCE:-false}" != "true" ]; then
-  echo "::notice::Release $EXISTING already exists for this commit/name/preset."
-  echo "::notice::Use force=true to rebuild."
-  SKIP=true
-fi
-
-# Export GitHub Actions outputs
-{
-  echo "skip=$SKIP"
-  echo "name=$NAME"
-  echo "slug=$SLUG"
-  echo "tag=$TAG"
-  echo "preset=$PRESET"
-  echo "preset_idx=$IDX"
-  echo "fp=$FP"
-} >> "$GITHUB_OUTPUT"
-
-echo "Kernel name: $NAME"
-echo "Slug: $SLUG"
-echo "Release tag: $TAG"
-echo "Uname preset: $PRESET"
-echo "Skip build: $SKIP"
-
+          echo "Kernel name: $NAME"
+          echo "Slug: $SLUG"
+          echo "Release tag: $TAG"
+          echo "Uname preset: $PRESET"
+          echo "Skip build: $SKIP"
 
   build:
     needs: plan
