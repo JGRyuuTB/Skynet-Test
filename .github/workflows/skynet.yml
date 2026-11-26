@@ -3,7 +3,6 @@ name: SKYNET - Build and Release
 # Single workflow: checks GitHub Releases, patches, builds, packages,
 # publishes and verifies the release.
 on:
-
   workflow_dispatch:
     inputs:
       kernel_name:
@@ -56,10 +55,7 @@ jobs:
       fp: ${{ steps.p.outputs.fp }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: false
-          fetch-depth: 0
-
+        with: { submodules: false }
       - id: p
         env:
           GH_TOKEN: ${{ github.token }}
@@ -67,65 +63,37 @@ jobs:
           IN_PRESET: ${{ inputs.uname_preset }}
           IN_TAG: ${{ inputs.release_tag }}
           IN_FORCE: ${{ inputs.force }}
-          GITHUB_REF_TYPE: ${{ github.ref_type }}
-          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-
           # UTF-8 allowed (e.g. Japanese); strip only shell/sed-dangerous chars
-          NAME=$(printf '%s' "${IN_NAME:-ゼロツー002-RTX}" | sed 's/["\\$`'\''|&;<>\/[:space:]]//g')
+          NAME=$(printf '%s' "${IN_NAME:-ゼロツー002-RTX}" | sed "s/[\"\\\\\$\`'|&;<>\/[:space:]]//g")
           [ -n "$NAME" ] || NAME="ゼロツー002-RTX"
-
           # ASCII slug for tag/file names
           SLUG=$(printf '%s' "$NAME" | iconv -c -f UTF-8 -t ASCII | tr -cd 'A-Za-z0-9._-')
-          [ -n "$SLUG" ] || SLUG="SKYNET"
-
-          PRESET="${IN_PRESET:-off}"
-          case "$PRESET" in
-            off)  IDX=0 ;;
-            4.19) IDX=1 ;;
-            5.4)  IDX=2 ;;
-            5.10) IDX=3 ;;
-            5.15) IDX=4 ;;
-            6.1)  IDX=5 ;;
-            6.6)  IDX=6 ;;
-            *) echo "::error::Bad preset: $PRESET"; exit 1 ;;
-          esac
-
+          [ -n "$SLUG" ] || SLUG=SKYNET
+          PRESET=${IN_PRESET:-off}
+          case "$PRESET" in off) IDX=0;; 4.19) IDX=1;; 5.4) IDX=2;; 5.10) IDX=3;; 5.15) IDX=4;; 6.1) IDX=5;; 6.6) IDX=6;; *) echo "bad preset"; exit 1;; esac
           SHA=$(git rev-parse HEAD)
           FP="$SHA|$NAME|$PRESET"
 
-          TAG="${IN_TAG:-}"
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ -n "${GITHUB_REF_NAME:-}" ]; then
-            TAG="$GITHUB_REF_NAME"
-          fi
-
+          TAG="$IN_TAG"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then TAG="$GITHUB_REF_NAME"; fi
           if [ -z "$TAG" ]; then
             LAST=$(gh release list --limit 200 --json tagName -q '.[].tagName' \
               | grep -E '^skynet-17-r[0-9]+$' | sed 's/.*-r//' | sort -n | tail -1 || true)
             TAG="skynet-17-r$(( ${LAST:-0} + 1 ))"
-          else
-            TAG=$(printf '%s' "$TAG" | tr -s '[:space:]' '-')
           fi
 
           SKIP=false
           EXISTING=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate \
-            -q ".[] | select((.body // \"\") | contains(\"skynet-fingerprint: $FP\")) | .tag_name" \
-            | head -n 1 || true)
-
-          if [ -n "$EXISTING" ] && [ "${IN_FORCE:-false}" != "true" ]; then
+            -q ".[] | select((.body // \"\") | contains(\"skynet-fingerprint: $FP\")) | .tag_name" | head -1 || true)
+          if [ -n "$EXISTING" ] && [ "$IN_FORCE" != "true" ]; then
             echo "::notice::Release $EXISTING already built from this commit/name/preset. Skipping (use force)."
             SKIP=true
           fi
-
           {
-            echo "skip=$SKIP"
-            echo "name=$NAME"
-            echo "slug=$SLUG"
-            echo "tag=$TAG"
-            echo "preset=$PRESET"
-            echo "preset_idx=$IDX"
-            echo "fp=$FP"
+            echo "skip=$SKIP"; echo "name=$NAME"; echo "slug=$SLUG"; echo "tag=$TAG"
+            echo "preset=$PRESET"; echo "preset_idx=$IDX"; echo "fp=$FP"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -143,9 +111,7 @@ jobs:
       DEFCONFIG: vendor/xiaomi/miatoll_defconfig
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 1
+        with: { submodules: recursive, fetch-depth: 1 }
 
       - name: Free disk space
         run: |
@@ -164,8 +130,7 @@ jobs:
 
       - name: Set kernel name (CONFIG_LOCALVERSION)
         run: |
-          set -euo pipefail
-          CFG="arch/arm64/configs/$DEFCONFIG"
+          CFG=arch/arm64/configs/$DEFCONFIG
           sed -i '/^CONFIG_LOCALVERSION=/d;/^CONFIG_LOCALVERSION_AUTO/d;/^# CONFIG_LOCALVERSION_AUTO/d' "$CFG"
           {
             echo "CONFIG_LOCALVERSION=\"-$NAME\""
@@ -176,20 +141,17 @@ jobs:
       - name: Fetch Clang
         env:
           CLANG_REPO: ${{ inputs.clang_repo || 'kdrag0n/proton-clang' }}
-        run: |
-          set -euo pipefail
-          git clone --depth=1 "https://github.com/$CLANG_REPO" "$HOME/clang"
+        run: git clone --depth=1 "https://github.com/$CLANG_REPO" "$HOME/clang"
 
       - name: Build kernel
         env:
           NO_POLLY: ${{ github.event_name == 'push' && 'true' || inputs.no_polly }}
         run: |
-          set -euo pipefail
+          set -eo pipefail
           export PATH="$HOME/clang/bin:$PATH"
-          export KBUILD_BUILD_USER=skynet
-          export KBUILD_BUILD_HOST=github
+          export KBUILD_BUILD_USER=skynet KBUILD_BUILD_HOST=github
           MK="make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-DSKYNET_UNAME_DEFAULT=$PRESET_IDX"
-          $MK "$DEFCONFIG"
+          $MK $DEFCONFIG
           if [ "$NO_POLLY" = "true" ]; then
             scripts/config --file out/.config -d LLVM_POLLY || true
             $MK olddefconfig
@@ -199,13 +161,9 @@ jobs:
 
       - name: Verify kernel name
         run: |
-          set -euo pipefail
           REL=$(cat out/include/config/kernel.release)
           echo "kernel.release = $REL"
-          case "$REL" in
-            *"-$NAME"*) ;;
-            *) echo "::error::kernel.release '$REL' does not contain -$NAME"; exit 1 ;;
-          esac
+          case "$REL" in *"-$NAME"*) ;; *) echo "::error::kernel.release '$REL' does not contain -$NAME"; exit 1;; esac
           echo "REL=$REL" >> "$GITHUB_ENV"
 
       - name: Package AnyKernel3 ZIP
@@ -214,31 +172,18 @@ jobs:
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/.github ak3/README.md ak3/LICENSE
           cp anykernel3/anykernel.sh ak3/anykernel.sh
-
-          NEW_STRING="$NAME Kernel for miatoll ($REL)"
-          python3 -c '
-import pathlib, sys
-p = pathlib.Path("ak3/anykernel.sh")
-txt = p.read_text(encoding="utf-8")
-lines = [
-    f"kernel.string={sys.argv[1]}" if line.startswith("kernel.string=") else line
-    for line in txt.splitlines()
-]
-p.write_text("\n".join(lines) + "\n", encoding="utf-8")
-' "$NEW_STRING"
-
+          sed -i "s|^kernel.string=.*|kernel.string=$NAME Kernel for miatoll ($REL)|" ak3/anykernel.sh
           cp out/arch/arm64/boot/Image.gz-dtb ak3/
           [ -f out/arch/arm64/boot/dtbo.img ] && cp out/arch/arm64/boot/dtbo.img ak3/ || true
           cp scripts/skynet-uname.sh ak3/skynet-uname.sh
-
           cat > ak3/skynet-build.prop <<PROP
-kernel.release=$REL
-kernel.name=$NAME
-uname.default=$PRESET
-source.commit=$GITHUB_SHA
-build.utc=$(date -u +%FT%TZ)
-PROP
-
+          kernel.release=$REL
+          kernel.name=$NAME
+          uname.default=$PRESET
+          source.commit=$GITHUB_SHA
+          build.utc=$(date -u +%FT%TZ)
+          PROP
+          sed -i 's/^          //' ak3/skynet-build.prop
           ZIP="${SLUG}-miatoll-${TAG}.zip"
           (cd ak3 && zip -r9 "../$ZIP" . -x '.git*')
           sha256sum "$ZIP" > "$ZIP.sha256"
@@ -261,30 +206,22 @@ PROP
         run: |
           set -euo pipefail
           cat > notes.md <<NOTES
-**$NAME** kernel for Xiaomi miatoll (curtana / joyeuse / excalibur / gram)
+          **$NAME** kernel for Xiaomi miatoll (curtana / joyeuse / excalibur / gram)
 
-- kernel.release: \`$REL\`
-- uname spoof default: \`$PRESET\` (change at runtime: \`su -c sh skynet-uname.sh list\`, or \`echo 5.10 > /proc/skynet_uname\`)
-- commit: \`$GITHUB_SHA\`
+          - kernel.release: \`$REL\`
+          - uname spoof default: \`$PRESET\` (change at runtime: \`su -c sh skynet-uname.sh list\`, or \`echo 5.10 > /proc/skynet_uname\`)
+          - commit: \`$GITHUB_SHA\`
 
-UNTESTED build: back up boot/dtbo before flashing.
+          UNTESTED build: back up boot/dtbo before flashing.
 
-<!-- skynet-fingerprint: $FP -->
-NOTES
-
+          <!-- skynet-fingerprint: $FP -->
+          NOTES
+          sed -i 's/^          //' notes.md
           if gh release view "$TAG" >/dev/null 2>&1; then
-            if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-              gh release delete "$TAG" --yes
-            else
-              gh release delete "$TAG" --yes --cleanup-tag
-            fi
+            gh release delete "$TAG" --yes --cleanup-tag
           fi
-
           gh release create "$TAG" "$ZIP" "$ZIP.sha256" "$SLUG-$TAG.config" \
-            --target "$GITHUB_SHA" \
-            --title "$NAME $TAG ($REL)" \
-            --notes-file notes.md \
-            --prerelease
+            --target "$GITHUB_SHA" --title "$NAME $TAG ($REL)" --notes-file notes.md --prerelease
 
       - name: Verify release
         if: github.event_name == 'push' || inputs.publish
@@ -292,10 +229,10 @@ NOTES
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mkdir -p verify
-          gh release download "$TAG" --dir verify --pattern "$ZIP" --pattern "$ZIP.sha256"
-          (cd verify && sha256sum -c "$ZIP.sha256")
-          unzip -t "verify/$ZIP" >/dev/null
-          unzip -p "verify/$ZIP" skynet-build.prop | grep -F "kernel.release=$REL"
+          mkdir -p verify && cd verify
+          gh release download "$TAG" --pattern "$ZIP" --pattern "$ZIP.sha256"
+          sha256sum -c "$ZIP.sha256"
+          unzip -t "$ZIP" >/dev/null
+          unzip -p "$ZIP" skynet-build.prop | grep "kernel.release=$REL"
           gh release view "$TAG" --json body -q .body | grep -F "skynet-fingerprint: $FP"
           echo "Release $TAG verified"
