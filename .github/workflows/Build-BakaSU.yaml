@@ -74,7 +74,6 @@ jobs:
           SHA="$(git rev-parse HEAD)"
           FP="${GITHUB_REF_NAME:-main}|$SHA|$NAME|$PRESET"
           
-          # Usar la versión elegida por el usuario
           VERSION="${IN_VERSION:-R1}"
           TAG="BakaSU-${VERSION}"
           
@@ -101,7 +100,7 @@ jobs:
       DEFCONFIG: vendor/xiaomi/miatoll_defconfig
     steps:
       - uses: actions/checkout@v4
-        with: { submodules: recursive, fetch-depth: 1 }
+        with: { submodules: recursive, fetch-depth: 10 } 
 
       - name: Integrate BakaSU (hooks manuales)
         if: github.ref_name == 'root'
@@ -248,7 +247,7 @@ jobs:
               print("OK: sys_reboot")
           PY
 
-      - name: Export write_op (quitar static + EXPORT_SYMBOL al final)
+      - name: Export write_op
         if: github.ref_name == 'root'
         run: |
           set -euo pipefail
@@ -258,7 +257,6 @@ jobs:
           if ! grep -q 'EXPORT_SYMBOL(write_op)' "$SELINUXFS"; then
             printf '\nEXPORT_SYMBOL(write_op);\n' >> "$SELINUXFS"
           fi
-          grep -q 'EXPORT_SYMBOL(write_op)' "$SELINUXFS" || { echo "::error::write_op no exportado"; exit 1; }
 
       - name: Enable BakaSU in defconfig
         if: github.ref_name == 'root'
@@ -272,7 +270,7 @@ jobs:
           grep -q '^CONFIG_KSU=y$' "$CFG" || echo 'CONFIG_KSU=y' >> "$CFG"
           grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' "$CFG" || echo 'CONFIG_KSU_MANUAL_HOOK=y' >> "$CFG"
 
-      - name: Patch BakaSU checks (fallback)
+      - name: Patch BakaSU checks
         if: github.ref_name == 'root'
         run: |
           set -euo pipefail
@@ -288,7 +286,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bc bison flex libssl-dev libelf-dev cpio zip python3 lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi device-tree-compiler libncurses-dev ccache xz-utils
+          sudo apt-get install -y --no-install-recommends bc bison flex libssl-dev libelf-dev cpio zip python3 lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi device-tree-compiler libncurses-dev ccache xz-utils jq
 
       - name: Apply kernel uname patch
         run: python3 scripts/apply-skynet-uname.py .
@@ -376,7 +374,7 @@ jobs:
       - name: Package AnyKernel3 ZIP
         run: |
           set -euo pipefail
-          ZIP="${TAG}-miatoll.zip"
+          ZIP="ZeroTwo-Kernel 5.15.170 | BakaSU-${VERSION}.zip"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/.github ak3/README.md ak3/LICENSE
           cp anykernel3/anykernel.sh ak3/anykernel.sh
@@ -394,6 +392,8 @@ jobs:
         run: |
           set -euo pipefail
           { 
+            echo "![Banner](https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/assets/banner.png)"
+            echo
             echo "## Android17 Kernel (BakaSU)"
             echo
             echo "Kernel build for **all Xiaomi Miatoll-family devices**"
@@ -402,10 +402,6 @@ jobs:
             echo "- Kernel release: \`5.15.170-Android17-$NAME\`"
             echo "- Type: \`BakaSU (Root)\`"
             echo "- Source commit: \`$GITHUB_SHA\`"
-            echo
-            echo "### Included source commits"
-            git log -10 --pretty=format:'- \`%h\` %s' "$GITHUB_SHA"
-            echo
             echo
             echo "### Files"
             echo "- \`$ZIP\` — flashable AnyKernel3 package"
@@ -416,8 +412,43 @@ jobs:
 
           if gh release view "$TAG" >/dev/null 2>&1; then gh release delete "$TAG" --yes --cleanup-tag; fi
 
-          # Sin --prerelease, para que sea un Release oficial
           gh release create "$TAG" "$ZIP" "$ZIP.sha" \
             --target "$GITHUB_SHA" \
-            --title "$TAG | 5.15.170-Android17-$NAME" \
+            --title "$TAG | ZeroTwo Kernel 5.15.170-Android17-$NAME" \
             --notes-file release-notes.md
+
+      - name: Notify Telegram Bot
+        if: success()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "::warning::Faltan los secretos TELEGRAM_TOKEN o TELEGRAM_CHAT_ID. Saltando notificación."
+            exit 0
+          fi
+          
+          BANNER_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/assets/banner.png"
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/$TAG"
+          CHANGELOG=$(git log -3 --pretty=format:"- %s")
+          
+          CAPTION="🚀 <b>New Kernel Release!</b> 🚀
+
+<b>$TAG | ZeroTwo Kernel 5.15.170-Android17-$NAME</b>
+
+👤 <b>Maintainer:</b> @JG_ryuu
+
+<b>Changelog:</b>
+$CHANGELOG
+
+📥 <a href='$RELEASE_URL'>Download here</a>"
+          
+          jq -n \
+            --arg chat_id "$CHAT_ID" \
+            --arg photo "$BANNER_URL" \
+            --arg caption "$CAPTION" \
+            '{chat_id: $chat_id, photo: $photo, caption: $caption, parse_mode: "HTML"}' > payload.json
+
+          curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendPhoto" \
+            -H "Content-Type: application/json" \
+            -d @payload.json
