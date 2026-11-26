@@ -180,23 +180,51 @@ jobs:
           NO_POLLY: ${{ github.event_name == 'push' && 'true' || inputs.no_polly }}
         run: |
           set -eo pipefail
-          export PATH="$HOME/clang/bin:$PATH"
+          LLVM_BIN="$HOME/clang/bin"
+
+          # IMPORTANT: keep Ubuntu tools first in PATH. GCC invokes `ld` by
+          # searching PATH; putting the bundled Clang directory first makes
+          # host utilities accidentally use its incompatible `ld` binary.
+          export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$LLVM_BIN"
           export KBUILD_BUILD_USER=skynet KBUILD_BUILD_HOST=github
-          # Build host-side kernel utilities with Ubuntu's native toolchain.
-          # The bundled Clang repository may contain an old/incompatible `ld`.
           export HOSTCC=/usr/bin/gcc
           export HOSTCXX=/usr/bin/g++
           export HOSTLD=/usr/bin/ld
 
-          # Use the downloaded LLVM toolchain only for the ARM64 kernel.
-          MK="make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++ HOSTLD=/usr/bin/ld CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-DSKYNET_UNAME_DEFAULT=$PRESET_IDX"
-          $MK $DEFCONFIG
+          # Fail early if the downloaded LLVM toolchain is incomplete.
+          test -x "$LLVM_BIN/clang"
+          test -x "$LLVM_BIN/ld.lld"
+          test -x "$LLVM_BIN/llvm-ar"
+          echo "Host linker: $(command -v ld)"
+          /usr/bin/ld --version | head -1
+          echo "Kernel compiler: $LLVM_BIN/clang"
+
+          # Use absolute LLVM paths for the ARM64 target; host tools remain GCC/BFD.
+          MAKE_ARGS=(
+            O=out
+            ARCH=arm64
+            CC="$LLVM_BIN/clang"
+            LD="$LLVM_BIN/ld.lld"
+            AR="$LLVM_BIN/llvm-ar"
+            NM="$LLVM_BIN/llvm-nm"
+            OBJCOPY="$LLVM_BIN/llvm-objcopy"
+            OBJDUMP="$LLVM_BIN/llvm-objdump"
+            STRIP="$LLVM_BIN/llvm-strip"
+            HOSTCC=/usr/bin/gcc
+            HOSTCXX=/usr/bin/g++
+            HOSTLD=/usr/bin/ld
+            CROSS_COMPILE=aarch64-linux-gnu-
+            CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+            KCFLAGS=-DSKYNET_UNAME_DEFAULT=$PRESET_IDX
+          )
+
+          make "${MAKE_ARGS[@]}" "$DEFCONFIG"
           if [ "$NO_POLLY" = "true" ]; then
             scripts/config --file out/.config -d LLVM_POLLY || true
-            $MK olddefconfig
+            make "${MAKE_ARGS[@]}" olddefconfig
           fi
-          $MK -j"$(nproc)" Image.gz-dtb
-          $MK -j"$(nproc)" dtbo.img || echo "::warning::dtbo.img not produced"
+          make "${MAKE_ARGS[@]}" -j"$(nproc)" Image.gz-dtb
+          make "${MAKE_ARGS[@]}" -j"$(nproc)" dtbo.img || echo "::warning::dtbo.img not produced"
 
       - name: Verify kernel name
         run: |
