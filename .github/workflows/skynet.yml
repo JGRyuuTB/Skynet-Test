@@ -71,7 +71,9 @@ jobs:
           [ -n "$NAME" ] || NAME="ゼロツー002-RTX"
 
           # ASCII-only slug for ZIP/config filenames.
-          SLUG="$(printf '%s' "$NAME" | iconv -c -f UTF-8 -t ASCII 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
+          # Do not use iconv in a pipe under pipefail: dropping Japanese
+          # characters can make iconv return status 1 and abort the step.
+          SLUG="$(NAME="$NAME" python3 -c 'import os,re; s=os.environ["NAME"].encode("ascii", "ignore").decode(); print(re.sub(r"[^A-Za-z0-9._-]", "", s))')"
           [ -n "$SLUG" ] || SLUG="SKYNET"
 
           PRESET="${IN_PRESET:-off}"
