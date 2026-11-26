@@ -143,19 +143,18 @@ jobs:
         with: { submodules: recursive, fetch-depth: 1 }
 
       # ------------------------------------------------------------------
-      # Integración manual de BakaSU (sustituye al setup.sh que fallaba en 4.14)
+      # Integración manual de BakaSU (clonado directo en drivers/kernelsu)
       # ------------------------------------------------------------------
       - name: Integrate BakaSU manually (Manual Hook)
         if: github.ref_name == 'root'
         run: |
           set -euo pipefail
-          # Clonar BakaSU en un directorio temporal
-          git clone --depth=1 https://github.com/Baka-SU/BakaSU.git /tmp/bakasu
 
-          # Copiar el driver al árbol del kernel
-          cp -r /tmp/bakasu/kernel drivers/kernelsu
+          # Clonar BakaSU DIRECTAMENTE en drivers/kernelsu para que su Kbuild
+          # detecte el repositorio Git y no abort la compilación.
+          git clone --depth=1 https://github.com/Baka-SU/BakaSU.git drivers/kernelsu
 
-          # Integrar en el sistema de build
+          # Integrar en el sistema de build del kernel
           echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
             sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
