@@ -139,18 +139,15 @@ jobs:
         with: { submodules: recursive, fetch-depth: 1 }
 
       # ------------------------------------------------------------------
-      # Integración de BakaSU: clonar con submódulos + symlink + búsqueda
-      # dinámica del Kconfig + bypass del check de submódulo del Kbuild.
+      # Integración de BakaSU: clonar con submódulos + symlink + bypass del check
       # ------------------------------------------------------------------
       - name: Integrate BakaSU (Manual Hook)
         if: github.ref_name == 'root'
         run: |
           set -euo pipefail
 
-          # Clonar CON submódulos para que el directorio kernel/ se descargue
           git clone --depth=1 --recurse-submodules https://github.com/Baka-SU/BakaSU.git KernelSU
 
-          # Buscar el directorio que contiene Kconfig (KernelSU/kernel o KernelSU)
           KSU_KERNEL_DIR=""
           for d in KernelSU/kernel KernelSU; do
               if [ -f "$d/Kconfig" ]; then
@@ -158,7 +155,6 @@ jobs:
                   break
               fi
           done
-
           if [ -z "$KSU_KERNEL_DIR" ]; then
               echo "::error::No se encontró Kconfig en KernelSU/. Contenido:"
               ls -la KernelSU/ || true
@@ -167,26 +163,19 @@ jobs:
           fi
           echo "BakaSU kernel dir: $KSU_KERNEL_DIR"
 
-          # Crear el symlink drivers/kernelsu -> ../$KSU_KERNEL_DIR
           ln -sfn "../$KSU_KERNEL_DIR" drivers/kernelsu
           test -f drivers/kernelsu/Kconfig || { echo "::error::drivers/kernelsu/Kconfig no existe"; exit 1; }
           test -f drivers/kernelsu/Kbuild  || { echo "::error::drivers/kernelsu/Kbuild no existe"; exit 1; }
           echo "Symlink creado: drivers/kernelsu -> $(readlink drivers/kernelsu)"
 
-          # El Kbuild aborta si no detecta un submódulo git real. Como usamos
-          # symlink, convertimos ese $(error ...) en $(warning ...) para que
-          # el build continúe.
           if [ -f "$KSU_KERNEL_DIR/Kbuild" ]; then
               sed -i 's/\$(error You should use BakaSU as a git submodule/\$(warning You should use BakaSU as a git submodule/' "$KSU_KERNEL_DIR/Kbuild" || true
-              echo "Kbuild patch aplicado (error -> warning)"
           fi
 
-          # Integrar en el sistema de build del kernel
           echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
           grep -q 'source "drivers/kernelsu/Kconfig"' drivers/Kconfig || \
             sed -i '/^endmenu/i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
 
-          # Insertar los hooks manuales dentro del cuerpo de las funciones
           python3 - <<'PY'
           import re
           from pathlib import Path
@@ -258,6 +247,7 @@ jobs:
           else
             echo "write_op ya exportado o archivo no encontrado"
           fi
+          grep -n 'EXPORT_SYMBOL(write_op)' "$SELINUXFS" || { echo "::error::write_op not exported"; exit 1; }
 
       - name: Enable BakaSU in miatoll defconfig (root branch only)
         if: github.ref_name == 'root'
@@ -265,9 +255,13 @@ jobs:
           set -euo pipefail
           CFG="arch/arm64/configs/$DEFCONFIG"
           test -f "$CFG"
+          # KALLSYMS_ALL depende de DEBUG_KERNEL en 4.14; sin DEBUG_KERNEL se desactiva
+          grep -q '^CONFIG_DEBUG_KERNEL=y$' "$CFG" || echo 'CONFIG_DEBUG_KERNEL=y' >> "$CFG"
+          grep -q '^CONFIG_KALLSYMS=y$' "$CFG" || echo 'CONFIG_KALLSYMS=y' >> "$CFG"
+          grep -q '^CONFIG_KALLSYMS_ALL=y$' "$CFG" || echo 'CONFIG_KALLSYMS_ALL=y' >> "$CFG"
           grep -q '^CONFIG_KSU=y$' "$CFG" || echo 'CONFIG_KSU=y' >> "$CFG"
           grep -q '^CONFIG_KSU_MANUAL_HOOK=y$' "$CFG" || echo 'CONFIG_KSU_MANUAL_HOOK=y' >> "$CFG"
-          tail -n 8 "$CFG"
+          tail -n 10 "$CFG"
 
       - name: Free disk space
         run: |
@@ -434,6 +428,15 @@ jobs:
           )
 
           make "${MAKE_ARGS[@]}" "$DEFCONFIG"
+
+          # Forzar KALLSYMS_ALL y sus dependencias (DEBUG_KERNEL) porque
+          # olddefconfig los desactiva si DEBUG_KERNEL no está.
+          scripts/config --file out/.config -e DEBUG_KERNEL -e KALLSYMS -e KALLSYMS_ALL
+          make "${MAKE_ARGS[@]}" olddefconfig
+
+          # Verificar que BakaSU verá lo que espera
+          grep -E '^CONFIG_KALLSYMS_ALL=y$' out/.config || { echo "::error::KALLSYMS_ALL not set in out/.config"; exit 1; }
+
           if [ "$NO_POLLY" = "true" ]; then
             scripts/config --file out/.config -d LLVM_POLLY || true
             make "${MAKE_ARGS[@]}" olddefconfig
