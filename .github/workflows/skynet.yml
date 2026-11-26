@@ -182,7 +182,14 @@ jobs:
           set -eo pipefail
           export PATH="$HOME/clang/bin:$PATH"
           export KBUILD_BUILD_USER=skynet KBUILD_BUILD_HOST=github
-          MK="make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-DSKYNET_UNAME_DEFAULT=$PRESET_IDX"
+          # Build host-side kernel utilities with Ubuntu's native toolchain.
+          # The bundled Clang repository may contain an old/incompatible `ld`.
+          export HOSTCC=/usr/bin/gcc
+          export HOSTCXX=/usr/bin/g++
+          export HOSTLD=/usr/bin/ld
+
+          # Use the downloaded LLVM toolchain only for the ARM64 kernel.
+          MK="make O=out ARCH=arm64 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCC=/usr/bin/gcc HOSTCXX=/usr/bin/g++ HOSTLD=/usr/bin/ld CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- KCFLAGS=-DSKYNET_UNAME_DEFAULT=$PRESET_IDX"
           $MK $DEFCONFIG
           if [ "$NO_POLLY" = "true" ]; then
             scripts/config --file out/.config -d LLVM_POLLY || true
