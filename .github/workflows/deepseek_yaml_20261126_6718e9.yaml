@@ -208,7 +208,7 @@ jobs:
                   if n == 0: raise SystemExit("ERROR: newfstat not found for newfstat_ret hook")
               p.write_text(src2, encoding="utf-8"); print("OK: newfstat_ret")
 
-          # Hook 6: ksu_handle_fstat64_ret dentro de fstat64 (retorno, 32-bit su)
+          # Hook 6: ksu_handle_fstat64_ret dentro de fstat64 (retorno)
           p = Path("fs/stat.c"); src = p.read_text(encoding="utf-8")
           if "ksu_handle_fstat64_ret(&fd" not in src:
               pat = re.compile(
@@ -235,6 +235,52 @@ jobs:
                   src2, n = pat2.subn(repl64, src, count=1)
                   if n == 0: raise SystemExit("ERROR: fstat64 not found for fstat64_ret hook")
               p.write_text(src2, encoding="utf-8"); print("OK: fstat64_ret")
+
+          # Hook 7: ksu_handle_sys_reboot en kernel/reboot.c
+          p = Path("kernel/reboot.c"); src = p.read_text(encoding="utf-8")
+          if "ksu_handle_sys_reboot(magic1" not in src:
+              # 7.1: Insertar el extern antes de SYSCALL_DEFINE4(reboot, ...)
+              pat_ext = re.compile(
+                  r'(SYSCALL_DEFINE4\s*\(\s*reboot\s*,\s*int\s*,\s*magic1\b)',
+                  re.M
+              )
+              ext = (r'#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+                     'extern int ksu_handle_sys_reboot(int magic1, int magic2,\n'
+                     '                                 unsigned int cmd, void __user **arg);\n'
+                     '#endif\n\n'
+                     r'\1')
+              src2, n = pat_ext.subn(ext, src, count=1)
+              if n == 0:
+                  raise SystemExit("ERROR: SYSCALL_DEFINE4(reboot) no encontrado para el extern de sys_reboot")
+              src = src2
+
+              # 7.2: Insertar la llamada después de las declaraciones (char buffer[256]; int ret = 0;)
+              #      y antes de la comprobación de privilegios (ns_capable).
+              pat_call = re.compile(
+                  r'(SYSCALL_DEFINE4\s*\(\s*reboot\b.*?\n\{.*?'
+                  r'int\s+ret\s*=\s*0;)',
+                  re.S
+              )
+              call = (r'\1\n#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+                      '\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n'
+                      '#endif')
+              src3, n = pat_call.subn(call, src, count=1)
+              if n == 0:
+                  # Fallback: insertar justo antes de la comprobación de ns_capable
+                  pat_ns = re.compile(
+                      r'(\n\s*if\s*\(!ns_capable\([^;]*CAP_SYS_BOOT\)\))',
+                      re.S
+                  )
+                  src3, n = pat_ns.subn(
+                      r'\n#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+                      r'\tksu_handle_sys_reboot(magic1, magic2, cmd, &arg);\n'
+                      r'#endif\1',
+                      src, count=1
+                  )
+                  if n == 0:
+                      raise SystemExit("ERROR: no se encontró punto de inserción para sys_reboot")
+              p.write_text(src3, encoding="utf-8")
+              print("OK: sys_reboot")
           PY
 
           echo "--- Verificación ---"
@@ -244,6 +290,7 @@ jobs:
           grep -n -A2 'ksu_handle_stat(&dfd' fs/stat.c || true
           grep -n -A2 'ksu_handle_newfstat_ret(&fd' fs/stat.c || true
           grep -n -A2 'ksu_handle_fstat64_ret(&fd' fs/stat.c || true
+          grep -n -A2 'ksu_handle_sys_reboot(magic1' kernel/reboot.c || true
 
       - name: Export write_op (quitar static + EXPORT_SYMBOL al final)
         if: github.ref_name == 'root'
