@@ -74,7 +74,6 @@ jobs:
           SHA="$(git rev-parse HEAD)"
           FP="$SHA|$NAME|$PRESET"
           
-          # Usar la versión elegida por el usuario
           VERSION="${IN_VERSION:-R1}"
           TAG="Vanilla-${VERSION}"
           
@@ -101,7 +100,7 @@ jobs:
       DEFCONFIG: vendor/xiaomi/miatoll_defconfig
     steps:
       - uses: actions/checkout@v4
-        with: { submodules: recursive, fetch-depth: 1 }
+        with: { submodules: recursive, fetch-depth: 10 } # Cambiado a 10 para el changelog del bot
 
       - name: Free disk space
         run: |
@@ -111,7 +110,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bc bison flex libssl-dev libelf-dev cpio zip python3 lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi device-tree-compiler libncurses-dev ccache xz-utils
+          sudo apt-get install -y --no-install-recommends bc bison flex libssl-dev libelf-dev cpio zip python3 lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi device-tree-compiler libncurses-dev ccache xz-utils jq
 
       - name: Apply kernel uname patch
         run: python3 scripts/apply-skynet-uname.py .
@@ -196,7 +195,7 @@ jobs:
       - name: Package AnyKernel3 ZIP
         run: |
           set -euo pipefail
-          ZIP="${TAG}-miatoll.zip"
+          ZIP="ZeroTwo-Kernel 5.15.170 | Vanilla-${VERSION}.zip"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/.github ak3/README.md ak3/LICENSE
           cp anykernel3/anykernel.sh ak3/anykernel.sh
@@ -214,6 +213,9 @@ jobs:
         run: |
           set -euo pipefail
           { 
+            # Insertar banner en el release de GitHub
+            echo "![Banner](https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/assets/banner.png)"
+            echo
             echo "## Android17 Kernel (Vanilla)"
             echo
             echo "Kernel build for **all Xiaomi Miatoll-family devices**"
@@ -222,10 +224,6 @@ jobs:
             echo "- Kernel release: \`5.15.170-Android17-$NAME\`"
             echo "- Type: \`Vanilla (Non-Root)\`"
             echo "- Source commit: \`$GITHUB_SHA\`"
-            echo
-            echo "### Included source commits"
-            git log -10 --pretty=format:'- \`%h\` %s' "$GITHUB_SHA"
-            echo
             echo
             echo "### Files"
             echo "- \`$ZIP\` — flashable AnyKernel3 package"
@@ -236,8 +234,38 @@ jobs:
 
           if gh release view "$TAG" >/dev/null 2>&1; then gh release delete "$TAG" --yes --cleanup-tag; fi
 
-          # Sin --prerelease, para que sea un Release oficial
           gh release create "$TAG" "$ZIP" "$ZIP.sha" \
             --target "$GITHUB_SHA" \
-            --title "$TAG | 5.15.170-Android17-$NAME" \
+            --title "$TAG | ZeroTwo Kernel 5.15.170-Android17-$NAME" \
             --notes-file release-notes.md
+
+      - name: Notify Telegram Bot
+        if: success()
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+            echo "::warning::Faltan los secretos TELEGRAM_TOKEN o TELEGRAM_CHAT_ID. Saltando notificación."
+            exit 0
+          fi
+          
+          BANNER_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/assets/banner.png"
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/$TAG"
+          
+          # Obtener los ultimos 3 commits para el changelog (en ingles)
+          CHANGELOG=$(git log -3 --pretty=format:"- %s")
+          
+          # Crear mensaje en ingles
+          CAPTION="🚀 <b>New Kernel Release!</b> 🚀%0A%0A<b>$TAG | ZeroTwo Kernel 5.15.170-Android17-$NAME</b>%0A%0A<b>Changelog:</b>%0A$CHANGELOG%0A%0A📥 <a href='$RELEASE_URL'>Download here</a>"
+          
+          # Crear JSON payload de forma segura con jq
+          jq -n \
+            --arg chat_id "$CHAT_ID" \
+            --arg photo "$BANNER_URL" \
+            --arg caption "$(echo -e "$CAPTION" | sed 's/%0A/\n/g')" \
+            '{chat_id: $chat_id, photo: $photo, caption: $caption, parse_mode: "HTML"}' > payload.json
+
+          curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendPhoto" \
+            -H "Content-Type: application/json" \
+            -d @payload.json
