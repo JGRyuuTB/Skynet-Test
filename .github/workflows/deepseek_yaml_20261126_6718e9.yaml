@@ -157,20 +157,17 @@ jobs:
               if n == 0:
                   pat2 = re.compile(r'(static long do_faccessat\s*\([^)]+\)\s*\n\{)', re.M)
                   src2, n = pat2.subn(hook, src, count=1)
-                  if n == 0:
-                      raise SystemExit("ERROR: faccessat/do_faccessat not found")
+                  if n == 0: raise SystemExit("ERROR: faccessat/do_faccessat not found")
               p.write_text(src2, encoding="utf-8"); print("OK: faccessat")
 
-          # Hook 4: newfstatat -> ksu_handle_stat (detectar nombre de variable: flag o flags)
+          # Hook 4: ksu_handle_stat dentro de newfstatat
           p = Path("fs/stat.c"); src = p.read_text(encoding="utf-8")
           if "ksu_handle_stat(&dfd" not in src:
-              # Detectar el nombre real del último parámetro de la syscall
               m_sig = re.search(r'SYSCALL_DEFINE4\s*\(\s*newfstatat\b[^)]*\)', src)
-              var = "flag"  # default en 4.14
+              var = "flag"
               if m_sig:
                   m_var = re.search(r',\s*int\s*,\s*(\w+)\s*\)', m_sig.group(0))
-                  if m_var:
-                      var = m_var.group(1)
+                  if m_var: var = m_var.group(1)
               pat = re.compile(r'(SYSCALL_DEFINE4\s*\(\s*newfstatat\b[^)]*\)\s*\n\{)', re.M)
               hook = (r'\1\n#ifdef CONFIG_KSU\n'
                       '\textern int ksu_handle_stat(int *dfd, const char __user **filename_user,\n'
@@ -178,11 +175,40 @@ jobs:
                       f'\tksu_handle_stat(&dfd, &filename, &{var});\n'
                       '#endif\n')
               src2, n = pat.subn(hook, src, count=1)
-              if n == 0:
-                  print("WARN: newfstatat no encontrado")
+              if n == 0: print("WARN: newfstatat no encontrado")
               else:
                   p.write_text(src2, encoding="utf-8")
                   print(f"OK: stat (variable usada: {var})")
+
+          # Hook 5: ksu_handle_newfstat_ret dentro de newfstat (retorno)
+          p = Path("fs/stat.c"); src = p.read_text(encoding="utf-8")
+          if "ksu_handle_newfstat_ret(&fd" not in src:
+              # La syscall es: SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+              pat = re.compile(
+                  r'(SYSCALL_DEFINE2\s*\(\s*newfstat\s*,[^)]*struct stat __user \*,\s*statbuf\s*\)\s*\n\{.*?'
+                  r'error = cp_new_stat\(&stat, statbuf\);)',
+                  re.S
+              )
+              hook = (r'\1\n#ifdef CONFIG_KSU\n'
+                      '\textern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n'
+                      '\tksu_handle_newfstat_ret(&fd, &statbuf);\n'
+                      '#endif\n')
+              src2, n = pat.subn(hook, src, count=1)
+              if n == 0:
+                  # Fallback: buscar simplemente "return error;" dentro de newfstat
+                  pat2 = re.compile(
+                      r'(SYSCALL_DEFINE2\s*\(\s*newfstat\b.*?\n\{.*?)'
+                      r'(\n\s*return error;)',
+                      re.S
+                  )
+                  def repl(m):
+                      return (m.group(1) + '\n#ifdef CONFIG_KSU\n'
+                              '\textern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);\n'
+                              '\tksu_handle_newfstat_ret(&fd, &statbuf);\n'
+                              '#endif' + m.group(2))
+                  src2, n = pat2.subn(repl, src, count=1)
+                  if n == 0: raise SystemExit("ERROR: newfstat not found for newfstat_ret hook")
+              p.write_text(src2, encoding="utf-8"); print("OK: newfstat_ret")
           PY
 
           echo "--- Verificación ---"
@@ -190,6 +216,7 @@ jobs:
           grep -n -A2 'ksu_handle_setresuid(ruid' kernel/sys.c || true
           grep -n -A2 'ksu_handle_faccessat(&dfd' fs/open.c || true
           grep -n -A2 'ksu_handle_stat(&dfd' fs/stat.c || true
+          grep -n -A2 'ksu_handle_newfstat_ret(&fd' fs/stat.c || true
 
       - name: Export write_op (quitar static + EXPORT_SYMBOL al final)
         if: github.ref_name == 'root'
