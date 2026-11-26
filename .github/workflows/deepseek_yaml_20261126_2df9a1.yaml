@@ -143,16 +143,28 @@ jobs:
         with: { submodules: recursive, fetch-depth: 1 }
 
       # ------------------------------------------------------------------
-      # Integración manual de BakaSU (clonado directo en drivers/kernelsu)
+      # Integración de BakaSU (clonar en KernelSU/ + symlink drivers/kernelsu)
       # ------------------------------------------------------------------
-      - name: Integrate BakaSU manually (Manual Hook)
+      - name: Integrate BakaSU (Manual Hook)
         if: github.ref_name == 'root'
         run: |
           set -euo pipefail
 
-          # Clonar BakaSU DIRECTAMENTE en drivers/kernelsu para que su Kbuild
-          # detecte el repositorio Git y no abort la compilación.
-          git clone --depth=1 https://github.com/Baka-SU/BakaSU.git drivers/kernelsu
+          # Clonar el repositorio completo en la raíz del kernel, como hace
+          # setup.sh, para que el Kbuild encuentre el .git y no aborte con
+          # "You should use BakaSU as a git submodule instead of copying code directly".
+          git clone --depth=1 https://github.com/Baka-SU/BakaSU.git KernelSU
+
+          # BakaSU espera que drivers/kernelsu sea un symlink a KernelSU/kernel.
+          # Así el Kconfig queda en drivers/kernelsu/Kconfig y el Kbuild en
+          # drivers/kernelsu/Kbuild, ambos resolviendo al repo real.
+          ln -sfn KernelSU/kernel drivers/kernelsu
+
+          # Verificación rápida de la estructura
+          test -f drivers/kernelsu/Kconfig || { echo "::error::drivers/kernelsu/Kconfig no existe"; exit 1; }
+          test -f drivers/kernelsu/Kbuild  || { echo "::error::drivers/kernelsu/Kbuild no existe"; exit 1; }
+          test -d KernelSU/.git            || { echo "::error::KernelSU/.git no existe"; exit 1; }
+          echo "BakaSU clonado en KernelSU/, symlink drivers/kernelsu -> KernelSU/kernel"
 
           # Integrar en el sistema de build del kernel
           echo 'obj-$(CONFIG_KSU) += kernelsu/' >> drivers/Makefile
