@@ -22,7 +22,7 @@ extern int version_string(LINUX_VERSION_CODE);
 int version_string(LINUX_VERSION_CODE);
 #endif
 
-#define SKYNET_UTS_RELEASE "5.15.170-Android17-ZeroTwo-002-RTX"
+#define SKYNET_UTS_RELEASE "5.15.170-Android17-ZeroTwo"
 
 struct uts_namespace init_uts_ns = {
 	.kref = KREF_INIT(2),
