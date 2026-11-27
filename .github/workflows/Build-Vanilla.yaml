@@ -79,7 +79,10 @@ jobs:
 
           SKIP=false
           EXISTING="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate -q ".[] | select((.body // \"\") | contains(\"android17-fingerprint: $FP\")) | .tag_name" | sed -n '1p' || true)"
-          if [ -n "$EXISTING" ] && [ "${IN_FORCE:-false}" != "true" ]; then SKIP=true; fi
+          if [ -n "$EXISTING" ] && [ "${IN_FORCE:-false}" != "true" ]; then
+            SKIP=true
+            echo "::notice::Ya existe un release con este mismo build ($EXISTING). Usa force=true para recompilar."
+          fi
           {
             echo "skip=$SKIP"; echo "name=$NAME"; echo "slug=$SLUG"; echo "tag=$TAG"
             echo "version=$VERSION"
@@ -100,6 +103,8 @@ jobs:
       PRESET_IDX: ${{ needs.plan.outputs.preset_idx }}
       FP: ${{ needs.plan.outputs.fp }}
       DEFCONFIG: vendor/xiaomi/miatoll_defconfig
+      KIND: Vanilla
+      KIND_LABEL: Vanilla (Non-Root)
     steps:
       - uses: actions/checkout@v4
         with: { submodules: recursive, fetch-depth: 10 }
@@ -112,7 +117,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bc bison flex libssl-dev libelf-dev cpio zip python3 lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi device-tree-compiler libncurses-dev ccache xz-utils jq
+          sudo apt-get install -y --no-install-recommends bc bison flex libssl-dev libelf-dev cpio zip unzip python3 lld llvm gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi device-tree-compiler libncurses-dev ccache xz-utils jq
 
       - name: Apply kernel uname patch
         run: python3 scripts/apply-skynet-uname.py .
@@ -174,6 +179,7 @@ jobs:
           NO_POLLY: ${{ github.event_name == 'push' && 'true' || inputs.no_polly }}
         run: |
           set -eo pipefail
+          BUILD_START=$(date +%s)
           LLVM_BIN="$HOME/clang/bin"
           export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$LLVM_BIN"
           export KBUILD_BUILD_USER=Android KBUILD_BUILD_HOST=Android KBUILD_BUILD_VERSION=1 KBUILD_BUILD_TIMESTAMP="$BUILD_DATE"
@@ -194,52 +200,152 @@ jobs:
           make "${MAKE_ARGS[@]}" -j"$(nproc)" Image.gz Image.gz-dtb
           make "${MAKE_ARGS[@]}" -j"$(nproc)" dtbo.img || echo "::warning::dtbo.img not produced"
 
+          # Datos para el mensaje de Telegram
+          DUR=$(( $(date +%s) - BUILD_START ))
+          if [ "$DUR" -ge 3600 ]; then
+            BUILD_TIME="$((DUR/3600))h $(((DUR%3600)/60))m $((DUR%60))s"
+          else
+            BUILD_TIME="$((DUR/60))m $((DUR%60))s"
+          fi
+          TOOLCHAIN="$("$LLVM_BIN/clang" --version | sed -n '1p' | sed -E 's/ *\(.*//; s/ version / /')"
+          LINKER="$("$LLVM_BIN/ld.lld" --version | sed -n '1p' | sed -E 's/ *\(.*//')"
+          {
+            echo "BUILD_TIME=$BUILD_TIME"
+            echo "TOOLCHAIN=${TOOLCHAIN:-Clang}"
+            echo "LINKER=${LINKER:-LLD}"
+          } >> "$GITHUB_ENV"
+
       - name: Package AnyKernel3 ZIP
         run: |
           set -euo pipefail
-          ZIP="ZeroTwo-Kernel-5.15.170-Vanilla-${VERSION}.zip"
+          ZIP="ZeroTwo-Kernel-5.15.170-${KIND}-${VERSION}.zip"
+          KSTRING="$NAME Android17 Kernel for all Xiaomi Miatoll devices (5.15.170-Android17-$NAME)"
+
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/.github ak3/README.md ak3/LICENSE
-          cp anykernel3/anykernel.sh ak3/anykernel.sh
-          sed -i "s|^kernel.string=.*|kernel.string=$NAME Android17 Kernel for all Xiaomi Miatoll devices (5.15.170-Android17-$NAME)|" ak3/anykernel.sh
-          cp out/arch/arm64/boot/Image.gz ak3/
-          cp out/arch/arm64/boot/Image.gz-dtb ak3/
-          if [ -s out/arch/arm64/boot/dtbo.img ]; then cp out/arch/arm64/boot/dtbo.img ak3/; fi
+
+          # Usa anykernel3/anykernel.sh del repo si existe; si no, usa este integrado.
+          if [ -f anykernel3/anykernel.sh ]; then
+            cp anykernel3/anykernel.sh ak3/anykernel.sh
+          else
+            echo "::notice::anykernel3/anykernel.sh no existe en el repo, usando el script integrado."
+            cat > ak3/anykernel.sh <<'AK3'
+          ### AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+
+          ### AnyKernel setup
+          # global properties
+          properties() { '
+          kernel.string=ZeroTwo Kernel
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=miatoll
+          device.name2=curtana
+          device.name3=excalibur
+          device.name4=gram
+          device.name5=joyeuse
+          supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; } # end properties
+
+          ### AnyKernel install
+          ## boot shell variables
+          block=boot;
+          is_slot_device=0;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+
+          # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
+          . tools/ak3-core.sh;
+
+          # boot install
+          dump_boot;
+          write_boot;
+          ## end boot install
+          AK3
+          fi
+          sed -i "s|^kernel.string=.*|kernel.string=$KSTRING|" ak3/anykernel.sh
+
+          IMAGES=()
+          for f in Image.gz Image.gz-dtb dtb.img dtbo.img; do
+            if [ -s "out/arch/arm64/boot/$f" ]; then
+              cp "out/arch/arm64/boot/$f" ak3/
+              IMAGES+=("$f")
+            fi
+          done
+          [ -s ak3/Image.gz ] || [ -s ak3/Image.gz-dtb ] || { echo "::error::No se generó ninguna imagen del kernel"; exit 1; }
+
+          N=${#IMAGES[@]}
+          if [ "$N" -gt 1 ]; then
+            FIRST=("${IMAGES[@]:0:$((N-1))}")
+            IMG_TXT="$(printf '%s, ' "${FIRST[@]}")"
+            IMG_TXT="${IMG_TXT%, } and ${IMAGES[$((N-1))]}"
+          else
+            IMG_TXT="${IMAGES[0]}"
+          fi
 
           (cd ak3 && zip -r9 "../$ZIP" . -x '.git*')
-          sha256sum "$ZIP" > "$ZIP.sha"; unzip -t "$ZIP" >/dev/null
-          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+          unzip -t "$ZIP" >/dev/null
+
+          MD5="$(md5sum "$ZIP" | cut -d' ' -f1)"
+          ZIP_SIZE="$(stat -c%s "$ZIP" | awk '{printf "%.1f MiB", $1/1048576}')"
+          {
+            echo "ZIP=$ZIP"
+            echo "MD5=$MD5"
+            echo "ZIP_SIZE=$ZIP_SIZE"
+            echo "IMAGES=$IMG_TXT"
+            echo "BUILD_DAY=$(LC_ALL=C date -u '+%A, %d %B %Y')"
+          } >> "$GITHUB_ENV"
 
       - name: Publish GitHub Release
-        env: { GH_TOKEN: "${{ github.token }}" }
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          {
-            echo "![Banner](https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/assets/banner.png)"
-            echo
-            echo "## Android17 Kernel (Vanilla)"
-            echo
-            echo "Kernel build for **all Xiaomi Miatoll-family devices**"
-            echo
-            echo "### Kernel information"
-            echo "- Kernel release: \`5.15.170-Android17-$NAME\`"
-            echo "- Type: \`Vanilla (Non-Root)\`"
-            echo "- Source commit: \`$GITHUB_SHA\`"
-            echo
-            echo "### Files"
-            echo "- \`$ZIP\` — flashable AnyKernel3 package"
-            echo "- \`$ZIP.sha\` — SHA-256 checksum"
-            echo
-            echo "Build fingerprint: \`$FP\`"
-            echo "<!-- android17-fingerprint: $FP -->"
-          } > release-notes.md
+          BANNER_URL="https://raw.githubusercontent.com/$GH_REPO/$GITHUB_SHA/.github/assets/banner.png"
+          TITLE="$TAG | ZeroTwo Kernel 5.15.170-Android17-$NAME"
 
-          if gh release view "$TAG" >/dev/null 2>&1; then gh release delete "$TAG" --yes --cleanup-tag; fi
+          # Notas del release en memoria: sin release-notes.md ni .sha
+          NOTES="$(cat <<EOF
+          ![Banner]($BANNER_URL)
 
-          gh release create "$TAG" "$ZIP" "$ZIP.sha" \
+          ## Android17 Kernel ($KIND)
+
+          Kernel build for **all Xiaomi Miatoll-family devices**
+
+          ### Kernel information
+          - Kernel release: \`5.15.170-Android17-$NAME\`
+          - Type: \`$KIND_LABEL\`
+          - Toolchain: \`$TOOLCHAIN\` / \`$LINKER\`
+          - Source commit: \`$GITHUB_SHA\`
+
+          ### File
+          - \`$ZIP\` — flashable AnyKernel3 package ($ZIP_SIZE)
+          - MD5: \`$MD5\`
+
+          Build fingerprint: \`$FP\`
+          <!-- android17-fingerprint: $FP -->
+          EOF
+          )"
+
+          # Borra el release anterior con el mismo tag (y su tag)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release delete "$TAG" --yes --cleanup-tag
+          fi
+          # Borra un tag huérfano que haya quedado de un intento fallido
+          gh api -X DELETE "repos/$GH_REPO/git/refs/tags/$TAG" >/dev/null 2>&1 || true
+
+          gh release create "$TAG" "$ZIP" \
             --target "$GITHUB_SHA" \
-            --title "$TAG | ZeroTwo Kernel 5.15.170-Android17-$NAME" \
-            --notes-file release-notes.md
+            --title "$TITLE" \
+            --notes "$NOTES"
+
+          echo "RELEASE_URL=$(gh release view "$TAG" --json url -q .url)" >> "$GITHUB_ENV"
 
       - name: Notify Telegram Bot
         if: success()
@@ -247,33 +353,73 @@ jobs:
           BOT_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+          set -uo pipefail
+          if [ -z "${BOT_TOKEN:-}" ] || [ -z "${CHAT_ID:-}" ]; then
             echo "::warning::Faltan los secretos TELEGRAM_TOKEN o TELEGRAM_CHAT_ID. Saltando notificación."
             exit 0
           fi
 
-          BANNER_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/assets/banner.png"
-          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/$TAG"
-          CHANGELOG=$(git log -3 --pretty=format:"- %s")
+          export BANNER_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/assets/banner.png"
+          export RELEASE_URL="${RELEASE_URL:-https://github.com/${{ github.repository }}/releases/tag/$TAG}"
+          export COMMIT_MSG="$(git log -1 --pretty=%B)"
 
-          CAPTION="$(printf '%s\n' \
-            "🚀 <b>New Kernel Release!</b> 🚀" \
-            "" \
-            "<b>$TAG | ZeroTwo Kernel 5.15.170-Android17-$NAME</b>" \
-            "" \
-            "👤 <b>Maintainer:</b> @JG_ryuu" \
-            "" \
-            "<b>Changelog:</b>" \
-            "$CHANGELOG" \
-            "" \
-            "📥 <a href='$RELEASE_URL'>Download here</a>")"
+          python3 - <<'PY'
+          import html, json, os, re
 
-          jq -n \
-            --arg chat_id "$CHAT_ID" \
-            --arg photo "$BANNER_URL" \
-            --arg caption "$CAPTION" \
-            '{chat_id: $chat_id, photo: $photo, caption: $caption, parse_mode: "HTML"}' > payload.json
+          env = os.environ
+          esc = lambda s: html.escape(s, quote=False)
 
-          curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendPhoto" \
-            -H "Content-Type: application/json" \
-            -d @payload.json
+          def build(commit):
+              return "\n".join([
+                  "✅ <b>Kernel Compiled Successfully</b>",
+                  "",
+                  f"<b>{esc(env['TAG'])} | ZeroTwo Kernel 5.15.170-Android17-{esc(env['NAME'])}</b>",
+                  "",
+                  f"🔩 <b>ToolChain:</b> {esc(env['TOOLCHAIN'])}",
+                  f"🧶 <b>Linker:</b> {esc(env['LINKER'])}",
+                  f"⏳ <b>Build Time:</b> {esc(env['BUILD_TIME'])}",
+                  f"〽️ <b>Zip Size:</b> {esc(env['ZIP_SIZE'])}",
+                  f"📅 <b>Date:</b> {esc(env['BUILD_DAY'])}",
+                  f"📦 <b>Images:</b> {esc(env['IMAGES'])}",
+                  "",
+                  "🔑 <b>MD5SUM</b>",
+                  f"<pre>{esc(env['MD5'])}</pre>",
+                  "",
+                  "📝 <b>Latest commit</b>",
+                  f"<pre>{esc(commit)}</pre>",
+                  "",
+                  "👤 <b>Maintainer:</b> @JG_ryuu",
+                  f"📥 <a href=\"{html.escape(env['RELEASE_URL'])}\">Download here</a>",
+              ])
+
+          def visible_len(text):
+              # Telegram cuenta en UTF-16 y sin las etiquetas HTML
+              plain = html.unescape(re.sub(r"<[^>]+>", "", text))
+              return len(plain.encode("utf-16-le")) // 2
+
+          def fit(limit):
+              commit = env.get("COMMIT_MSG", "").strip() or "(no commit message)"
+              text = build(commit)
+              while visible_len(text) > limit and commit:
+                  commit = commit[:-40] if len(commit) > 40 else ""
+                  text = build(commit.rstrip() + "\n…" if commit else "…")
+              return text
+
+          with open("tg_photo.json", "w", encoding="utf-8") as f:
+              json.dump({"chat_id": env["CHAT_ID"], "photo": env["BANNER_URL"],
+                         "caption": fit(1024), "parse_mode": "HTML"}, f, ensure_ascii=False)
+          with open("tg_text.json", "w", encoding="utf-8") as f:
+              json.dump({"chat_id": env["CHAT_ID"], "text": fit(4096), "parse_mode": "HTML",
+                         "link_preview_options": {"is_disabled": True}}, f, ensure_ascii=False)
+          PY
+
+          API="https://api.telegram.org/bot$BOT_TOKEN"
+          RESP="$(curl -sS -X POST "$API/sendPhoto" -H 'Content-Type: application/json' -d @tg_photo.json || true)"
+          if echo "$RESP" | jq -e '.ok == true' >/dev/null 2>&1; then
+            echo "Mensaje con banner enviado."
+          else
+            echo "::warning::sendPhoto falló: $(echo "$RESP" | jq -r '.description // "sin respuesta"' 2>/dev/null). Enviando sin banner."
+            RESP="$(curl -sS -X POST "$API/sendMessage" -H 'Content-Type: application/json' -d @tg_text.json || true)"
+            echo "$RESP" | jq -e '.ok == true' >/dev/null 2>&1 \
+              || echo "::warning::sendMessage también falló: $(echo "$RESP" | jq -r '.description // "sin respuesta"' 2>/dev/null)"
+          fi
