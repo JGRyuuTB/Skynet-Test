@@ -12,9 +12,9 @@ on:
         default: "ゼロツー002-RTX"
         required: true
       uname_preset:
-        description: "5.10 shows 5.10.357-Android17-<kernel_name>"
+        description: "Uname preset to patch (use 5.15; release is forced to 5.15.170-Android17-<kernel_name>)"
         type: choice
-        default: "5.10"
+        default: "5.15"
         options: ["off", "4.19", "5.4", "5.10", "5.15", "6.1", "6.6"]
       clang_repo:
         description: "Clang repo (owner/name)"
@@ -58,7 +58,6 @@ jobs:
           IN_NAME: ${{ inputs.kernel_name }}
           IN_PRESET: ${{ inputs.uname_preset }}
           IN_VERSION: ${{ inputs.release_version }}
-          IN_TAG: ${{ inputs.release_tag }}
           IN_FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
@@ -74,10 +73,10 @@ jobs:
           esac
           SHA="$(git rev-parse HEAD)"
           FP="${GITHUB_REF_NAME:-main}|$SHA|$NAME|$PRESET"
-          
+
           VERSION="${IN_VERSION:-R1}"
           TAG="BakaSU-${VERSION}"
-          
+
           SKIP=false
           EXISTING="$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate -q ".[] | select((.body // \"\") | contains(\"android17-fingerprint: $FP\")) | .tag_name" | sed -n '1p' || true)"
           if [ -n "$EXISTING" ] && [ "${IN_FORCE:-false}" != "true" ]; then SKIP=true; fi
@@ -103,7 +102,7 @@ jobs:
       DEFCONFIG: vendor/xiaomi/miatoll_defconfig
     steps:
       - uses: actions/checkout@v4
-        with: { submodules: recursive, fetch-depth: 10 } 
+        with: { submodules: recursive, fetch-depth: 10 }
 
       - name: Integrate BakaSU (hooks manuales)
         if: github.ref_name == 'root'
@@ -368,7 +367,7 @@ jobs:
 
           sed -i 's/^# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/' out/.config || true
           grep -q '^CONFIG_KALLSYMS_ALL=y$' out/.config || echo 'CONFIG_KALLSYMS_ALL=y' >> out/.config
-          
+
           if [ "$NO_POLLY" = "true" ]; then sed -i 's/^CONFIG_LLVM_POLLY=y/# CONFIG_LLVM_POLLY is not set/' out/.config || true; fi
 
           make "${MAKE_ARGS[@]}" -j"$(nproc)" Image.gz Image.gz-dtb
@@ -377,7 +376,7 @@ jobs:
       - name: Package AnyKernel3 ZIP
         run: |
           set -euo pipefail
-          ZIP="ZeroTwo-Kernel 5.15.170 | BakaSU-${VERSION}.zip"
+          ZIP="ZeroTwo-Kernel-5.15.170-BakaSU-${VERSION}.zip"
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 ak3
           rm -rf ak3/.git ak3/.github ak3/README.md ak3/LICENSE
           cp anykernel3/anykernel.sh ak3/anykernel.sh
@@ -385,7 +384,7 @@ jobs:
           cp out/arch/arm64/boot/Image.gz ak3/
           cp out/arch/arm64/boot/Image.gz-dtb ak3/
           if [ -s out/arch/arm64/boot/dtbo.img ]; then cp out/arch/arm64/boot/dtbo.img ak3/; fi
-          
+
           (cd ak3 && zip -r9 "../$ZIP" . -x '.git*')
           sha256sum "$ZIP" > "$ZIP.sha"; unzip -t "$ZIP" >/dev/null
           echo "ZIP=$ZIP" >> "$GITHUB_ENV"
@@ -394,7 +393,7 @@ jobs:
         env: { GH_TOKEN: "${{ github.token }}" }
         run: |
           set -euo pipefail
-          { 
+          {
             echo "![Banner](https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/assets/banner.png)"
             echo
             echo "## Android17 Kernel (BakaSU)"
@@ -411,6 +410,7 @@ jobs:
             echo "- \`$ZIP.sha\` — SHA-256 checksum"
             echo
             echo "Build fingerprint: \`$FP\`"
+            echo "<!-- android17-fingerprint: $FP -->"
           } > release-notes.md
 
           if gh release view "$TAG" >/dev/null 2>&1; then gh release delete "$TAG" --yes --cleanup-tag; fi
@@ -430,22 +430,23 @@ jobs:
             echo "::warning::Faltan los secretos TELEGRAM_TOKEN o TELEGRAM_CHAT_ID. Saltando notificación."
             exit 0
           fi
-          
+
           BANNER_URL="https://raw.githubusercontent.com/${{ github.repository }}/${{ github.sha }}/.github/assets/banner.png"
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/$TAG"
           CHANGELOG=$(git log -3 --pretty=format:"- %s")
-          
-          CAPTION="🚀 <b>New Kernel Release!</b> 🚀
 
-<b>$TAG | ZeroTwo Kernel 5.15.170-Android17-$NAME</b>
+          CAPTION="$(printf '%s\n' \
+            "🚀 <b>New Kernel Release!</b> 🚀" \
+            "" \
+            "<b>$TAG | ZeroTwo Kernel 5.15.170-Android17-$NAME</b>" \
+            "" \
+            "👤 <b>Maintainer:</b> @JG_ryuu" \
+            "" \
+            "<b>Changelog:</b>" \
+            "$CHANGELOG" \
+            "" \
+            "📥 <a href='$RELEASE_URL'>Download here</a>")"
 
-👤 <b>Maintainer:</b> @JG_ryuu
-
-<b>Changelog:</b>
-$CHANGELOG
-
-📥 <a href='$RELEASE_URL'>Download here</a>"
-          
           jq -n \
             --arg chat_id "$CHAT_ID" \
             --arg photo "$BANNER_URL" \
